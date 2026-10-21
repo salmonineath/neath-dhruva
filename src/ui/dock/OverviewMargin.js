@@ -66,9 +66,16 @@ export function applyOverviewDockMargin(dockUI) {
     const finalDockHeight = Math.round(dockH + margin);
 
     if (Main.overview.dash && isActorAlive(Main.overview.dash)) {
-        Main.overview.dash.set_height(finalDockHeight);
+        _setDashHeight(Main.overview.dash, finalDockHeight);
         Main.overview.dash.set_width(-1);
     }
+}
+
+// Runs on every frame of the Overview transition: only resize the dash when the
+// value changes, otherwise each call relayouts the Overview controls.
+function _setDashHeight(dash, height) {
+    if (!dash.natural_height_set || dash.natural_height !== height)
+        dash.set_height(height);
 }
 
 export function clearOverviewDockMargin(dockUI) {

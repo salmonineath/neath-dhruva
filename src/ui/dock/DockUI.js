@@ -94,6 +94,15 @@ const STYLE_SETTINGS = [
     'gradient-direction', 'dynamic-panel', 'dynamic-panel-length', 'dynamic-panel-position'
 ];
 
+function setPositionIfChanged(actor, x, y) {
+    if (actor.x !== x || actor.y !== y) actor.set_position(x, y);
+}
+
+function raiseToTopIfNeeded(actor) {
+    const parent = actor.get_parent();
+    if (parent && parent.get_last_child() !== actor) parent.set_child_above_sibling(actor, null);
+}
+
 export default class DockUI {
     static _instances = null;
 
@@ -798,11 +807,9 @@ export default class DockUI {
 
         this.actor.translation_x = 0;
         this.actor.translation_y = 0;
-        this.actor.set_position(targetX, targetY);
-
-        if (this.actor.get_parent()) {
-            this.actor.get_parent().set_child_above_sibling(this.actor, null);
-        }
+        // Called per Overview frame: avoid redundant moves and uiGroup restacks.
+        setPositionIfChanged(this.actor, targetX, targetY);
+        raiseToTopIfNeeded(this.actor);
     }
 
     _isOnSharedMonitorEdge() {
@@ -955,7 +962,7 @@ export default class DockUI {
 
         if (isActorAlive(this.actor)) this.actor.reactive = true;
         if (isActorAlive(this.bgActor)) this.bgActor.reactive = true;
-        if (isActorAlive(this.boxActor)) this.bgActor.reactive = true;
+        if (isActorAlive(this.boxActor)) this.boxActor.reactive = true;
 
         this._updateStruts();
 

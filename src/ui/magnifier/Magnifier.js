@@ -19,6 +19,7 @@
 
 import GLib from 'gi://GLib';
 import Clutter from 'gi://Clutter';
+import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
 import { Settings } from '../../core/SettingsManager.js';
 import { TimeoutTracker } from '../../core/TimeoutTracker.js';
@@ -127,6 +128,16 @@ function _checkPointerLeave(dockActor, settings) {
     dockActor._leaveCheckId = dockActor._magTimers.addTimeout(GLib.PRIORITY_DEFAULT, 16, checkLeave);
 }
 
+function _isDockShown(dockActor) {
+    return isActorAlive(dockActor) && !dockActor._isHidden && dockActor.visible && dockActor.opacity > 0;
+}
+
+// Never act on (or swallow clicks for) a dock the user cannot see, nor while
+// GNOME animates into or out of the Overview.
+function _isDockInteractive(dockActor) {
+    return _isDockShown(dockActor) && !dockActor._isAutohiding && !Main.overview.animationInProgress;
+}
+
 export function setupMagnification(dockActor, settings, dockPositionGetter) {
     if (!isActorAlive(dockActor)) return;
     teardownMagnification(dockActor);
@@ -166,7 +177,7 @@ export function setupMagnification(dockActor, settings, dockPositionGetter) {
     }
 
     global.stage.connectObject('captured-event', (_stage, event) => {
-        if (!isActorAlive(dockActor) || dockActor._isHidden) return Clutter.EVENT_PROPAGATE;
+        if (!_isDockInteractive(dockActor)) return Clutter.EVENT_PROPAGATE;
         const evType = event.type();
 
         if (evType === Clutter.EventType.MOTION) {

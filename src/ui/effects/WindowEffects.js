@@ -134,6 +134,62 @@ function _makeRestore(iconPos, dockPos, type) {
     return _applyEffectDuration(effect, duration);
 }
 
+// GNOME's own minimize/unminimize/map handler always runs before ours. When it
+// is not animating the actor, it has already called completed_*() itself, so we
+// must neither animate nor complete that actor again.
+function _gnomeIsAnimating(setName, actor) {
+    const set = Main.wm ? Main.wm[setName] : null;
+    return Boolean(set && set.has(actor));
+}
+
+// Only a pending actor (minimize/restore clicked in Dhruva) had its GNOME
+// completion swallowed by our completed_*() patch, so only then do we owe it.
+function _completeIfOwned(actor, origCompleted) {
+    if (actor !== _pendingActor) return;
+    _pendingActor = _pendingIcon = _pendingDockPos = null;
+    if (origCompleted && isActorAlive(actor)) origCompleted.call(Main.wm._shellwm, actor);
+}
+
+function _isAppButton(btn, app) {
+    const delegate = btn._delegate;
+    return Boolean(delegate && delegate.app && 'get_id' in delegate.app && delegate.app.get_id() === app.get_id());
+}
+
+function _dockButtons() {
+    return _dockUI && _dockUI.boxActor ? _dockUI.boxActor.get_children() : [];
+}
+
+function _findDockButton(win) {
+    const app = win && Shell.WindowTracker.get_default().get_window_app(win);
+    return app ? _dockButtons().find(btn => _isAppButton(btn, app)) : null;
+}
+
+function _pendingTarget(actor) {
+    if (actor !== _pendingActor || !_pendingIcon) return null;
+    const target = { iconPos: _pendingIcon, dockPos: _pendingDockPos };
+    _addEffectIdle(() => {
+        if (_pendingActor === actor) _pendingActor = _pendingIcon = _pendingDockPos = null;
+    });
+    return target;
+}
+
+// Take over only an animation GNOME is still running (it then hands the
+// completion to us); never re-animate a window GNOME already completed.
+function _takeoverTarget(actor, gnomeSet) {
+    if (actor !== _pendingActor && !_gnomeIsAnimating(gnomeSet, actor)) return null;
+    const btn = _findDockButton(actor.meta_window);
+    return btn ? { iconPos: captureActorRect(btn, actor.meta_window), dockPos: _dockUI.dockPosition } : null;
+}
+
+function _finishRunningEffects() {
+    for (const actor of [..._animatingActors].filter(isActorAlive)) {
+        [MIN_EFFECT_NAME, UNMIN_EFFECT_NAME]
+            .map(name => actor.get_effect(name))
+            .filter(Boolean)
+            .forEach(effect => effect.destroy());
+    }
+}
+
 function _patchWm() {
     if (_origShouldAnimate) return;
     if (!Main.wm || !Main.wm._shellwm || !Main.wm._shouldAnimateActor) return;
@@ -142,12 +198,13 @@ function _patchWm() {
     Main.wm._shouldAnimateActor = function (actor, types) {
         if (actor === _pendingActor || actor === _pendingLaunchActor || _animatingActors.includes(actor)) return false;
 
-        if (actor.meta_window && _dockUI && _dockUI._pendingLaunches && _dockUI._pendingLaunches.length > 0) {
+        const pendingLaunches = _docks.flatMap(dock => dock._pendingLaunches || []);
+        if (actor.meta_window && pendingLaunches.length > 0) {
             const tracker = Shell.WindowTracker.get_default();
             const winApp = tracker.get_window_app(actor.meta_window);
             const winClass = actor.meta_window.get_wm_class() ? actor.meta_window.get_wm_class().toLowerCase() : '';
 
-            const isPending = _dockUI._pendingLaunches.some(p => {
+            const isPending = pendingLaunches.some(p => {
                 if (p.consumed) return false;
                 if (p.appId && winApp && winApp.get_id() === p.appId) return true;
                 if (p.appId && winClass) {
@@ -212,10 +269,8 @@ export function finishRestoreEffect(actor) {
     _removeAnimatingActor(actor);
     if (isActorAlive(actor)) {
         if (actor._isDhruvaLaunching) {
+            // GNOME already completed the map when we suppressed its animation.
             actor._isDhruvaLaunching = false;
-            if (_origCompletedMap && Main.wm && Main.wm._shellwm) {
-                _origCompletedMap.call(Main.wm._shellwm, actor);
-            }
         } else if (_origCompletedUnminimize && Main.wm && Main.wm._shellwm) {
             _origCompletedUnminimize.call(Main.wm._shellwm, actor);
         }
@@ -277,53 +332,13 @@ export function setupWindowEffects(settings, dockUI) {
             }
 
             if (type === 'none') {
-                if (_origCompletedMinimize && Main.wm && Main.wm._shellwm && isActorAlive(actor)) {
-                    _origCompletedMinimize.call(Main.wm._shellwm, actor);
-                }
+                _completeIfOwned(actor, _origCompletedMinimize);
                 return;
             }
 
-            let iconPos = null;
-            let dockPos = null;
-            let isOurAnimation = false;
-
-            if (actor === _pendingActor && _pendingIcon) {
-                iconPos = _pendingIcon;
-                dockPos = _pendingDockPos;
-                isOurAnimation = true;
-
-                const capturedActor = _pendingActor;
-                _addEffectIdle(() => {
-                    if (_pendingActor === capturedActor) {
-                        _pendingActor = _pendingIcon = _pendingDockPos = null;
-                    }
-                });
-            } else if (_dockUI && _dockUI.boxActor && actor.meta_window) {
-                const win = actor.meta_window;
-                const tracker = Shell.WindowTracker.get_default();
-                const app = tracker.get_window_app(win);
-
-                if (app) {
-                    const appId = app.get_id();
-                    const children = _dockUI.boxActor.get_children();
-
-                    for (let i = 0; i < children.length; i++) {
-                        const btn = children[i];
-                        const delegate = btn._delegate;
-                        if (delegate && delegate.app && 'get_id' in delegate.app && delegate.app.get_id() === appId) {
-                            iconPos = captureActorRect(btn, win);
-                            dockPos = _dockUI.dockPosition;
-                            isOurAnimation = true;
-                            break;
-                        }
-                    }
-                }
-            }
-
-            if (!isOurAnimation) {
-                if (_origCompletedMinimize && Main.wm && Main.wm._shellwm && isActorAlive(actor)) {
-                    _origCompletedMinimize.call(Main.wm._shellwm, actor);
-                }
+            const target = _pendingTarget(actor) || _takeoverTarget(actor, '_minimizing');
+            if (!target) {
+                _completeIfOwned(actor, _origCompletedMinimize);
                 return;
             }
 
@@ -333,7 +348,7 @@ export function setupWindowEffects(settings, dockUI) {
             const old = actor.get_effect(MIN_EFFECT_NAME);
             if (old) actor.remove_effect(old);
 
-            actor.add_effect_with_name(MIN_EFFECT_NAME, _makeMinimize(iconPos, dockPos, type));
+            actor.add_effect_with_name(MIN_EFFECT_NAME, _makeMinimize(target.iconPos, target.dockPos, type));
         },
         'unminimize', (_wm, actor) => {
             const type = (_settings && Settings.minimizeEffect) || 'magic-lamp';
@@ -377,53 +392,13 @@ export function setupWindowEffects(settings, dockUI) {
             }
 
             if (type === 'none') {
-                if (_origCompletedUnminimize && Main.wm && Main.wm._shellwm && isActorAlive(actor)) {
-                    _origCompletedUnminimize.call(Main.wm._shellwm, actor);
-                }
+                _completeIfOwned(actor, _origCompletedUnminimize);
                 return;
             }
 
-            let iconPos = null;
-            let dockPos = null;
-            let isOurAnimation = false;
-
-            if (actor === _pendingActor && _pendingIcon) {
-                iconPos = _pendingIcon;
-                dockPos = _pendingDockPos;
-                isOurAnimation = true;
-
-                const capturedActor = _pendingActor;
-                _addEffectIdle(() => {
-                    if (_pendingActor === capturedActor) {
-                        _pendingActor = _pendingIcon = _pendingDockPos = null;
-                    }
-                });
-            } else if (_dockUI && _dockUI.boxActor && actor.meta_window) {
-                const win = actor.meta_window;
-                const tracker = Shell.WindowTracker.get_default();
-                const app = tracker.get_window_app(win);
-
-                if (app) {
-                    const appId = app.get_id();
-                    const children = _dockUI.boxActor.get_children();
-
-                    for (let i = 0; i < children.length; i++) {
-                        const btn = children[i];
-                        const delegate = btn._delegate;
-                        if (delegate && delegate.app && 'get_id' in delegate.app && delegate.app.get_id() === appId) {
-                            iconPos = captureActorRect(btn, win);
-                            dockPos = _dockUI.dockPosition;
-                            isOurAnimation = true;
-                            break;
-                        }
-                    }
-                }
-            }
-
-            if (!isOurAnimation) {
-                if (_origCompletedUnminimize && Main.wm && Main.wm._shellwm && isActorAlive(actor)) {
-                    _origCompletedUnminimize.call(Main.wm._shellwm, actor);
-                }
+            const target = _pendingTarget(actor) || _takeoverTarget(actor, '_unminimizing');
+            if (!target) {
+                _completeIfOwned(actor, _origCompletedUnminimize);
                 return;
             }
 
@@ -435,7 +410,7 @@ export function setupWindowEffects(settings, dockUI) {
 
             actor.show();
             actor.set_opacity(255);
-            actor.add_effect_with_name(UNMIN_EFFECT_NAME, _makeRestore(iconPos, dockPos, type));
+            actor.add_effect_with_name(UNMIN_EFFECT_NAME, _makeRestore(target.iconPos, target.dockPos, type));
         },
         WM_SIGNAL_OWNER
     );
@@ -450,11 +425,16 @@ export function teardownWindowEffects(dockUI) {
         global.window_manager.disconnectObject(WM_SIGNAL_OWNER);
         _clearEffectIdles();
 
+        // Finish running deform effects while the original completers still
+        // exist, so no window is left half-minimized after disable or lock.
+        _finishRunningEffects();
+
         _animatingActors.length = 0;
         _pendingActor = null;
         _pendingIcon = null;
         _pendingDockPos = null;
         _pendingLaunchActor = null;
+        delete global._dhruvaIsFade;
         _settings = null;
         _dockUI = null;
 
@@ -492,13 +472,12 @@ export function animateLaunch(win, btn, _dockPosition, iconRect = null) {
     const actor = win.get_compositor_private();
     if (!isActorAlive(actor)) return;
 
+    // GNOME completes the map itself: immediately when we suppressed its
+    // animation, or at the end of its own animation (which we must not fight).
+    if (_gnomeIsAnimating('_mapping', actor)) return;
+
     const type = (_settings && Settings.minimizeEffect) || 'magic-lamp';
-    if (type === 'none') {
-        if (_origCompletedMap && Main.wm && Main.wm._shellwm) {
-            _origCompletedMap.call(Main.wm._shellwm, actor);
-        }
-        return;
-    }
+    if (type === 'none') return;
 
     _addAnimatingActor(actor);
     actor._isDhruvaLaunching = true;

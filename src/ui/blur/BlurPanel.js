@@ -106,9 +106,16 @@ export class BlurPanel {
 
     _syncCloneSources() {
         if (!this.blurActor) return;
-        const isLive = this.blurActor.visible && !this._isStaticMode();
+        const isLive = this._isLiveClone();
         this._bgClone.source = isLive ? Main.layoutManager._backgroundGroup : null;
         this._winClone.source = isLive ? global.window_group : null;
+    }
+
+    // GNOME hides window_group for the whole Overview (incl. its closing
+    // transition). A Clone of a hidden source force-maps and repaints every
+    // window each frame, so stop cloning until windows are visible again.
+    _isLiveClone() {
+        return this.blurActor.visible && !this._isStaticMode() && global.window_group.visible;
     }
 
     _isStaticMode() {
@@ -201,6 +208,7 @@ export class BlurPanel {
 
         Main.sessionMode.connectObject('updated', onLockChanged, this);
         if (Main.screenShield) Main.screenShield.connectObject('locked-changed', onLockChanged, this);
+        global.window_group.connectObject('notify::visible', () => this._syncCloneSources(), this);
     }
 
     _onRootParentChanged() {
@@ -460,6 +468,7 @@ export class BlurPanel {
         if (this.blurActor) {
             Main.sessionMode.disconnectObject(this);
             if (Main.screenShield) Main.screenShield.disconnectObject(this);
+            global.window_group.disconnectObject(this);
             if (this._loaderActor) {
                 this._loaderActor.disconnectObject(this);
                 this._loaderActor = null;
